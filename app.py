@@ -108,6 +108,14 @@ ALL_MENU_ITEMS = [
     for name, price in items
 ]
 
+def trigger_rerun() -> None:
+    """Streamlit rerun helper compatible with old/new APIs."""
+    rerun_func = getattr(st, "experimental_rerun", None) or getattr(st, "rerun", None)
+    if rerun_func is None:
+        st.warning("このバージョンのStreamlitでは再描画がサポートされていません。")
+        return
+    rerun_func()
+
 st.set_page_config(page_title="飲み会ドリンク計算", layout="wide")
 
 # Initialize persistent state
@@ -174,7 +182,7 @@ if st.session_state.participants:
                 for order in st.session_state.orders:
                     if name in order["share_with"]:
                         order["share_with"].remove(name)
-                st.experimental_rerun()
+                trigger_rerun()
 else:
     st.info("参加者を追加するとここに表示されます。")
 
