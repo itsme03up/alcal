@@ -1,3 +1,6 @@
+import sqlite3
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 
@@ -108,6 +111,153 @@ ALL_MENU_ITEMS = [
     for name, price in items
 ]
 
+DB_PATH = Path(__file__).resolve().parent / "drink_orders.db"
+
+
+@st.cache_resource(show_spinner=False)
+def get_connection(path: str):
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            drink_name TEXT NOT NULL,
+            unit_price REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            memo TEXT,
+            category TEXT,
+            input_mode TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS order_shares (
+            order_id INTEGER NOT NULL,
+            participant_id INTEGER NOT NULL,
+            PRIMARY KEY (order_id, participant_id),
+            FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+            FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
+        );
+        """
+    )
+    conn.commit()
+
+
+def fetch_participants(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, name FROM participants ORDER BY LOWER(name) COLLATE NOCASE"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_orders(conn: sqlite3.Connection) -> list[dict]:
+    order_rows = conn.execute(
+        "SELECT id, drink_name, unit_price, quantity, memo, category, input_mode FROM orders ORDER BY created_at"
+    ).fetchall()
+
+    share_rows = conn.execute(
+        """
+        SELECT os.order_id, p.id as participant_id, p.name
+        FROM order_shares os
+        JOIN participants p ON p.id = os.participant_id
+        ORDER BY os.order_id, LOWER(p.name) COLLATE NOCASE
+        """
+    ).fetchall()
+
+    share_map: dict[int, dict[str, list]] = {}
+    for row in share_rows:
+        entry = share_map.setdefault(row["order_id"], {"names": [], "ids": []})
+        entry["names"].append(row["name"])
+        entry["ids"].append(row["participant_id"])
+
+    orders: list[dict] = []
+    for row in order_rows:
+        shares = share_map.get(row["id"], {"names": [], "ids": []})
+        orders.append(
+            {
+                "id": row["id"],
+                "drink_name": row["drink_name"],
+                "unit_price": float(row["unit_price"]),
+                "quantity": int(row["quantity"]),
+                "memo": row["memo"] or "",
+                "category": row["category"] or "",
+                "input_mode": row["input_mode"] or "",
+                "share_with": shares["names"],
+                "share_with_ids": shares["ids"],
+            }
+        )
+
+    return orders
+
+
+def add_participant(conn: sqlite3.Connection, name: str) -> tuple[bool, str | None]:
+    try:
+        conn.execute("INSERT INTO participants(name) VALUES (?)", (name,))
+        conn.commit()
+        return True, None
+    except sqlite3.IntegrityError:
+        return False, "同じ名前の参加者がすでに存在します。"
+
+
+def remove_participant(conn: sqlite3.Connection, participant_id: int) -> None:
+    conn.execute("DELETE FROM participants WHERE id = ?", (participant_id,))
+    # Clean up orders that no longer have any participants.
+    conn.execute(
+        """
+        DELETE FROM orders
+        WHERE id IN (
+            SELECT o.id
+            FROM orders o
+            LEFT JOIN order_shares os ON o.id = os.order_id
+            GROUP BY o.id
+            HAVING COUNT(os.order_id) = 0
+        )
+        """
+    )
+    conn.commit()
+
+
+def add_order(
+    conn: sqlite3.Connection,
+    *,
+    drink_name: str,
+    unit_price: float,
+    quantity: int,
+    memo: str,
+    category: str,
+    input_mode: str,
+    participant_ids: list[int],
+) -> None:
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO orders (drink_name, unit_price, quantity, memo, category, input_mode)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (drink_name, unit_price, quantity, memo, category, input_mode),
+    )
+    order_id = cursor.lastrowid
+    cursor.executemany(
+        "INSERT INTO order_shares (order_id, participant_id) VALUES (?, ?)",
+        [(order_id, pid) for pid in participant_ids],
+    )
+    conn.commit()
+
+
+def refresh_data(conn: sqlite3.Connection) -> None:
+    st.session_state.participants = fetch_participants(conn)
+    st.session_state.orders = fetch_orders(conn)
+
 def trigger_rerun() -> None:
     """Streamlit rerun helper compatible with old/new APIs."""
     rerun_func = getattr(st, "experimental_rerun", None) or getattr(st, "rerun", None)
@@ -162,6 +312,14 @@ def initialize_order_state() -> None:
         st.session_state._reset_order_mode = None
         st.session_state._last_menu_selection = None
 
+    available_names = {p["name"] for p in st.session_state.get("participants", [])}
+    if available_names:
+        st.session_state.order_share_with = [
+            name for name in st.session_state.order_share_with if name in available_names
+        ]
+    else:
+        st.session_state.order_share_with = []
+
     if MENU_DATA and st.session_state._last_menu_selection is None:
         # Align default drink name / price with current category selection.
         category = st.session_state.order_category
@@ -189,11 +347,9 @@ def reset_order_inputs(input_mode: str) -> None:
 
 st.set_page_config(page_title="飲み会ドリンク計算", layout="wide")
 
-# Initialize persistent state
-if "participants" not in st.session_state:
-    st.session_state.participants = []
-if "orders" not in st.session_state:
-    st.session_state.orders = []
+conn = get_connection(str(DB_PATH))
+init_db(conn)
+refresh_data(conn)
 
 st.title("飲み放題じゃない時のドリンク割り勘ツール")
 st.caption("参加者と注文を追加すると自動で金額を集計します。")
@@ -223,8 +379,12 @@ if ALL_MENU_ITEMS:
 with st.sidebar:
     st.header("リセット")
     if st.button("すべての入力をクリア", type="primary"):
-        st.session_state.participants = []
-        st.session_state.orders = []
+        conn.execute("DELETE FROM order_shares")
+        conn.execute("DELETE FROM orders")
+        conn.execute("DELETE FROM participants")
+        conn.commit()
+        refresh_data(conn)
+        reset_order_inputs(st.session_state.get("order_input_mode", "自由入力"))
         st.success("データをリセットしました。")
 
 st.subheader("参加者の管理")
@@ -236,23 +396,26 @@ if add_participant:
     name = new_participant.strip()
     if not name:
         st.warning("名前を入力してください。")
-    elif name in st.session_state.participants:
-        st.warning("同じ名前の参加者がすでに存在します。")
     else:
-        st.session_state.participants.append(name)
-        st.success(f"{name} を追加しました。")
+        success, error_msg = add_participant(conn, name)
+        if success:
+            refresh_data(conn)
+            st.success(f"{name} を追加しました。")
+        else:
+            st.warning(error_msg or "参加者の追加に失敗しました。")
 
-if st.session_state.participants:
+participants_data = st.session_state.participants
+if participants_data:
     cols = st.columns(3)
-    for idx, name in enumerate(st.session_state.participants):
+    for idx, participant in enumerate(participants_data):
         col = cols[idx % len(cols)]
+        name = participant["name"]
+        participant_id = participant["id"]
         with col:
             st.markdown(f"- {name}")
-            if st.button("削除", key=f"remove_{name}"):
-                st.session_state.participants.remove(name)
-                for order in st.session_state.orders:
-                    if name in order["share_with"]:
-                        order["share_with"].remove(name)
+            if st.button("削除", key=f"remove_{participant_id}"):
+                remove_participant(conn, participant_id)
+                refresh_data(conn)
                 trigger_rerun()
 else:
     st.info("参加者を追加するとここに表示されます。")
@@ -344,9 +507,10 @@ else:
         category_for_order = "自由入力"
 
     st.number_input("杯数", min_value=1, step=1, key="order_quantity")
+    participant_names = [participant["name"] for participant in participants_data]
     st.multiselect(
         "割り勘する参加者",
-        st.session_state.participants,
+        participant_names,
         key="order_share_with",
     )
     st.text_input("メモ (任意)", max_chars=60, key="order_memo")
@@ -368,19 +532,27 @@ else:
         elif not share_with_value:
             st.warning("割り勘する参加者を選択してください。")
         else:
-            st.session_state.orders.append(
-                {
-                    "drink_name": drink_name_value,
-                    "unit_price": unit_price_value,
-                    "quantity": quantity_value,
-                    "share_with": list(share_with_value),
-                    "memo": memo_value,
-                    "category": category_for_order,
-                    "input_mode": mode_label,
-                }
-            )
-            reset_order_inputs(input_mode)
-            st.success(f"{drink_name_value} を記録しました。")
+            name_to_id = {p["name"]: p["id"] for p in participants_data}
+            try:
+                participant_ids = [name_to_id[name] for name in share_with_value]
+            except KeyError:
+                st.error("参加者の取得に失敗しました。ページを更新してください。")
+                participant_ids = []
+
+            if participant_ids:
+                add_order(
+                    conn,
+                    drink_name=drink_name_value,
+                    unit_price=unit_price_value,
+                    quantity=quantity_value,
+                    memo=memo_value,
+                    category=category_for_order,
+                    input_mode=mode_label,
+                    participant_ids=participant_ids,
+                )
+                refresh_data(conn)
+                reset_order_inputs(input_mode)
+                st.success(f"{drink_name_value} を記録しました。")
 
 if st.session_state.orders:
     st.subheader("注文一覧")
@@ -405,13 +577,14 @@ if st.session_state.orders:
     st.dataframe(order_df, use_container_width=True)
 
     st.subheader("金額集計")
-    totals = {name: 0.0 for name in st.session_state.participants}
+    totals = {participant["name"]: 0.0 for participant in st.session_state.participants}
     for order in st.session_state.orders:
         total_price = order["unit_price"] * order["quantity"]
         if order["share_with"]:
             share = total_price / len(order["share_with"])
             for name in order["share_with"]:
-                totals[name] += share
+                if name in totals:
+                    totals[name] += share
 
     total_sum = sum(totals.values())
     totals_df = pd.DataFrame(
