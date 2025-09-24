@@ -116,6 +116,65 @@ def trigger_rerun() -> None:
         return
     rerun_func()
 
+def initialize_order_state() -> None:
+    """Ensure order input widgets have sensible defaults."""
+    if "order_input_mode" not in st.session_state:
+        st.session_state.order_input_mode = "メニューから選ぶ"
+
+    first_category = next(iter(MENU_DATA), None)
+    if "order_category" not in st.session_state:
+        st.session_state.order_category = first_category or "自由入力"
+
+    if "order_menu_index" not in st.session_state:
+        st.session_state.order_menu_index = 0
+
+    if "order_drink_name" not in st.session_state:
+        st.session_state.order_drink_name = ""
+
+    if "order_unit_price" not in st.session_state:
+        st.session_state.order_unit_price = 0.0
+
+    if "order_quantity" not in st.session_state:
+        st.session_state.order_quantity = 1
+
+    if "order_share_with" not in st.session_state:
+        st.session_state.order_share_with = []
+
+    if "order_memo" not in st.session_state:
+        st.session_state.order_memo = ""
+
+    if "_last_menu_selection" not in st.session_state:
+        st.session_state._last_menu_selection = None
+
+    if MENU_DATA and st.session_state._last_menu_selection is None:
+        # Align default drink name / price with current category selection.
+        category = st.session_state.order_category
+        items = MENU_DATA.get(category, [])
+        if not items:
+            for fallback_category, fallback_items in MENU_DATA.items():
+                if fallback_items:
+                    category = fallback_category
+                    items = fallback_items
+                    st.session_state.order_category = fallback_category
+                    break
+        if items:
+            default_index = min(st.session_state.order_menu_index, len(items) - 1)
+            name, price = items[default_index]
+            st.session_state.order_menu_index = default_index
+            st.session_state.order_drink_name = name
+            if price is not None:
+                st.session_state.order_unit_price = float(price)
+            st.session_state._last_menu_selection = (category, default_index)
+
+def reset_order_inputs(input_mode: str) -> None:
+    """Reset order form inputs after successful submission."""
+    st.session_state.order_quantity = 1
+    st.session_state.order_share_with = []
+    st.session_state.order_memo = ""
+    if input_mode == "自由入力":
+        st.session_state.order_drink_name = ""
+        st.session_state.order_unit_price = 0.0
+
 st.set_page_config(page_title="飲み会ドリンク計算", layout="wide")
 
 # Initialize persistent state
@@ -190,72 +249,126 @@ st.subheader("注文の入力")
 if not st.session_state.participants:
     st.warning("先に参加者を追加してください。")
 else:
-    with st.form("add_order", clear_on_submit=True):
-        input_mode = st.radio(
-            "ドリンクの選択方法",
-            ("メニューから選ぶ", "自由入力"),
-            horizontal=True,
+    initialize_order_state()
+
+    input_mode = st.radio(
+        "ドリンクの選択方法",
+        ("メニューから選ぶ", "自由入力"),
+        horizontal=True,
+        key="order_input_mode",
+    )
+
+    category_for_order = "自由入力"
+
+    if input_mode == "メニューから選ぶ" and MENU_DATA:
+        category_options = list(MENU_DATA.keys())
+        if st.session_state.order_category not in category_options:
+            st.session_state.order_category = category_options[0]
+
+        selected_category = st.selectbox(
+            "カテゴリー",
+            category_options,
+            key="order_category",
         )
 
-        selected_category = None
-        drink_name = ""
+        menu_items = MENU_DATA.get(selected_category, [])
+        if menu_items:
+            if st.session_state.order_menu_index >= len(menu_items):
+                st.session_state.order_menu_index = 0
 
-        if input_mode == "メニューから選ぶ" and MENU_DATA:
-            category_options = list(MENU_DATA.keys())
-            selected_category = st.selectbox("カテゴリー", category_options)
-            menu_items = MENU_DATA.get(selected_category, [])
-            menu_indices = list(range(len(menu_items)))
             menu_labels = [
                 f"{name} ({f'{price:,}円' if price is not None else '価格未設定'})"
                 for name, price in menu_items
             ]
-            selected_index = st.selectbox(
+            st.selectbox(
                 "ドリンク",
-                menu_indices,
+                list(range(len(menu_items))),
+                key="order_menu_index",
                 format_func=lambda idx: menu_labels[idx],
             )
+
+            selected_index = st.session_state.order_menu_index
             drink_name, base_price = menu_items[selected_index]
-            default_price = float(base_price) if base_price is not None else 0.0
-            unit_price = st.number_input(
+            st.session_state.order_drink_name = drink_name
+
+            current_selection = (selected_category, selected_index)
+            if st.session_state._last_menu_selection != current_selection:
+                st.session_state._last_menu_selection = current_selection
+                st.session_state.order_unit_price = (
+                    float(base_price) if base_price is not None else 0.0
+                )
+
+            st.number_input(
                 "単価 (円)",
                 min_value=0.0,
                 step=10.0,
-                value=default_price,
+                key="order_unit_price",
                 help="価格は必要に応じて調整できます。",
             )
             if base_price is None:
                 st.info("このメニューは価格が未設定です。適切な単価を入力してください。")
+
+            category_for_order = selected_category
         else:
-            drink_name = st.text_input("ドリンク名", max_chars=50)
-            unit_price = st.number_input(
+            st.warning("このカテゴリーにはメニューがありません。手入力で登録してください。")
+            st.session_state.order_drink_name = ""
+            st.session_state.order_unit_price = 0.0
+            st.number_input(
                 "単価 (円)",
                 min_value=0.0,
                 step=10.0,
+                key="order_unit_price",
             )
-            selected_category = "自由入力"
+    else:
+        if input_mode == "メニューから選ぶ" and not MENU_DATA:
+            st.info("メニューが登録されていません。自由入力をご利用ください。")
+        st.text_input("ドリンク名", max_chars=50, key="order_drink_name")
+        st.number_input(
+            "単価 (円)",
+            min_value=0.0,
+            step=10.0,
+            key="order_unit_price",
+        )
+        category_for_order = "自由入力"
 
-        quantity = st.number_input("杯数", min_value=1, step=1)
-        memo = st.text_input("メモ (任意)", max_chars=60)
-        submitted = st.form_submit_button("注文を記録", type="primary")
+    st.number_input("杯数", min_value=1, step=1, key="order_quantity")
+    st.multiselect(
+        "割り勘する参加者",
+        st.session_state.participants,
+        key="order_share_with",
+    )
+    st.text_input("メモ (任意)", max_chars=60, key="order_memo")
+
+    submitted = st.button("注文を記録", type="primary")
 
     if submitted:
-        drink_name = drink_name.strip()
-        if not drink_name:
+        drink_name_value = st.session_state.order_drink_name.strip()
+        unit_price_value = float(st.session_state.order_unit_price)
+        quantity_value = int(st.session_state.order_quantity)
+        share_with_value = st.session_state.order_share_with
+        memo_value = st.session_state.order_memo.strip()
+        mode_label = "メニュー" if input_mode == "メニューから選ぶ" else "自由入力"
+
+        if not drink_name_value:
             st.warning("ドリンク名を入力または選択してください。")
-        elif unit_price <= 0:
+        elif unit_price_value <= 0:
             st.warning("単価は0より大きい値にしてください。")
+        elif not share_with_value:
+            st.warning("割り勘する参加者を選択してください。")
         else:
             st.session_state.orders.append(
                 {
-                    "drink_name": drink_name,
-                    "unit_price": unit_price,
-                    "quantity": quantity,
-                    "memo": memo.strip(),
-                    "category": selected_category,
-                    "input_mode": "メニュー" if input_mode == "メニューから選ぶ" else "自由入力",
+                    "drink_name": drink_name_value,
+                    "unit_price": unit_price_value,
+                    "quantity": quantity_value,
+                    "share_with": list(share_with_value),
+                    "memo": memo_value,
+                    "category": category_for_order,
+                    "input_mode": mode_label,
                 }
             )
-            st.success(f"{drink_name} を記録しました。")
+            reset_order_inputs(input_mode)
+            st.success(f"{drink_name_value} を記録しました。")
 
 if st.session_state.orders:
     st.subheader("注文一覧")
@@ -271,6 +384,7 @@ if st.session_state.orders:
                 "数量": order["quantity"],
                 "合計金額": total_price,
                 "人数": len(order["share_with"]),
+                "割り勘する人": ", ".join(order["share_with"]),
                 "メモ": order["memo"],
             }
         )
