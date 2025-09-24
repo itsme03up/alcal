@@ -146,6 +146,22 @@ def initialize_order_state() -> None:
     if "_last_menu_selection" not in st.session_state:
         st.session_state._last_menu_selection = None
 
+    if "_reset_order_pending" not in st.session_state:
+        st.session_state._reset_order_pending = False
+    if "_reset_order_mode" not in st.session_state:
+        st.session_state._reset_order_mode = None
+
+    if st.session_state._reset_order_pending:
+        st.session_state.order_quantity = 1
+        st.session_state.order_share_with = []
+        st.session_state.order_memo = ""
+        if st.session_state._reset_order_mode == "自由入力":
+            st.session_state.order_drink_name = ""
+            st.session_state.order_unit_price = 0.0
+        st.session_state._reset_order_pending = False
+        st.session_state._reset_order_mode = None
+        st.session_state._last_menu_selection = None
+
     if MENU_DATA and st.session_state._last_menu_selection is None:
         # Align default drink name / price with current category selection.
         category = st.session_state.order_category
@@ -168,12 +184,8 @@ def initialize_order_state() -> None:
 
 def reset_order_inputs(input_mode: str) -> None:
     """Reset order form inputs after successful submission."""
-    st.session_state.order_quantity = 1
-    st.session_state.order_share_with = []
-    st.session_state.order_memo = ""
-    if input_mode == "自由入力":
-        st.session_state.order_drink_name = ""
-        st.session_state.order_unit_price = 0.0
+    st.session_state._reset_order_pending = True
+    st.session_state._reset_order_mode = input_mode
 
 st.set_page_config(page_title="飲み会ドリンク計算", layout="wide")
 
