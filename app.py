@@ -227,7 +227,6 @@ else:
             selected_category = "自由入力"
 
         quantity = st.number_input("杯数", min_value=1, step=1)
-        share_with = st.multiselect("割り勘する参加者", st.session_state.participants)
         memo = st.text_input("メモ (任意)", max_chars=60)
         submitted = st.form_submit_button("注文を記録", type="primary")
 
@@ -237,15 +236,12 @@ else:
             st.warning("ドリンク名を入力または選択してください。")
         elif unit_price <= 0:
             st.warning("単価は0より大きい値にしてください。")
-        elif not share_with:
-            st.warning("割り勘する参加者を選択してください。")
         else:
             st.session_state.orders.append(
                 {
                     "drink_name": drink_name,
                     "unit_price": unit_price,
                     "quantity": quantity,
-                    "share_with": share_with,
                     "memo": memo.strip(),
                     "category": selected_category,
                     "input_mode": "メニュー" if input_mode == "メニューから選ぶ" else "自由入力",
@@ -267,7 +263,6 @@ if st.session_state.orders:
                 "数量": order["quantity"],
                 "合計金額": total_price,
                 "人数": len(order["share_with"]),
-                "割り勘する人": ", ".join(order["share_with"]),
                 "メモ": order["memo"],
             }
         )
